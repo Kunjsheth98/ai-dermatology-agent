@@ -5,16 +5,17 @@ import os
 import random
 from PIL import Image
 from datetime import datetime
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
 
 # ================== CONFIG ==================
-MOCK_MODE = True              # 🔴 CHANGE TO False WHEN CARD WORKS
-ENABLE_SECOND_BRAIN = True
-STORE_IMAGES = True
-
+MOCK_MODE = True
 IMAGE_DIR = "stored_images"
 DB_PATH = "ai_dermatology.db"
+PDF_DIR = "reports"
 
 os.makedirs(IMAGE_DIR, exist_ok=True)
+os.makedirs(PDF_DIR, exist_ok=True)
 
 st.set_page_config(page_title="AI Dermatology Agent", layout="centered")
 st.title("AI Dermatology Agent")
@@ -25,237 +26,162 @@ conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 c = conn.cursor()
 
 c.execute("""
+CREATE TABLE IF NOT EXISTS chat (
+    user_id TEXT,
+    role TEXT,
+    message TEXT,
+    time TEXT
+)
+""")
+
+c.execute("""
 CREATE TABLE IF NOT EXISTS cases (
-    session_id TEXT PRIMARY KEY,
+    user_id TEXT,
+    date TEXT,
     skin_type TEXT,
     issues TEXT,
-    confidence INTEGER,
-    doctor_flag INTEGER,
-    brain_used TEXT,
-    notes TEXT
-)
-""")
-
-c.execute("""
-CREATE TABLE IF NOT EXISTS feedback (
-    session_id TEXT,
-    helpful TEXT
-)
-""")
-
-c.execute("""
-CREATE TABLE IF NOT EXISTS images (
-    session_id TEXT,
-    image_path TEXT
+    confidence INTEGER
 )
 """)
 
 conn.commit()
 
-# ================== CHAT MEMORY (BROWSER) ==================
+# ================== USER ID ==================
+if "user_id" not in st.session_state:
+    st.session_state.user_id = str(uuid.uuid4())
+
+user_id = st.session_state.user_id
+
+# ================== CHAT MEMORY ==================
 if "chat_messages" not in st.session_state:
-    st.session_state.chat_messages = [
-        {
+    c.execute("SELECT role, message, time FROM chat WHERE user_id=?", (user_id,))
+    rows = c.fetchall()
+    if rows:
+        st.session_state.chat_messages = [
+            {"role": r[0], "content": r[1], "time": r[2]} for r in rows
+        ]
+    else:
+        welcome = {
             "role": "assistant",
             "content": (
                 "Hi 👋 I’m your AI Dermatology Assistant.\n\n"
-                "You can ask skin or hair related questions, "
-                "or upload a face photo for deeper analysis."
+                "You can ask skin or hair questions, or upload a face photo."
             ),
             "time": datetime.now().strftime("%H:%M")
         }
-    ]
+        st.session_state.chat_messages = [welcome]
+        c.execute("INSERT INTO chat VALUES (?,?,?,?)",
+                  (user_id, "assistant", welcome["content"], welcome["time"]))
+        conn.commit()
 
 # ================== CHAT DISPLAY ==================
 st.subheader("Chat")
 
 for msg in st.session_state.chat_messages:
-    if msg["role"] == "user":
-        st.markdown(f"**You ({msg['time']}):** {msg['content']}")
-    else:
-        st.markdown(f"**AI ({msg['time']}):** {msg['content']}")
+    label = "You" if msg["role"] == "user" else "AI"
+    st.markdown(f"**{label} ({msg['time']}):** {msg['content']}")
 
 # ================== CHAT INPUT ==================
 user_input = st.text_input("Type your message and press Enter")
 
 if user_input:
-    st.session_state.chat_messages.append({
-        "role": "user",
-        "content": user_input,
-        "time": datetime.now().strftime("%H:%M")
-    })
+    t = datetime.now().strftime("%H:%M")
+    user_msg = {"role": "user", "content": user_input, "time": t}
+    st.session_state.chat_messages.append(user_msg)
+    c.execute("INSERT INTO chat VALUES (?,?,?,?)",
+              (user_id, "user", user_input, t))
 
-    st.session_state.chat_messages.append({
-        "role": "assistant",
-        "content": (
-            "Thanks for your message. I can help with skin and hair concerns. "
-            "You may upload a face photo for more accurate guidance."
-        ),
-        "time": datetime.now().strftime("%H:%M")
-    })
+    ai_reply = (
+        "Thanks for sharing. I can help only with skin, hair, or scalp concerns. "
+        "You may upload a face photo for deeper analysis."
+    )
 
+    ai_msg = {"role": "assistant", "content": ai_reply, "time": t}
+    st.session_state.chat_messages.append(ai_msg)
+    c.execute("INSERT INTO chat VALUES (?,?,?,?)",
+              (user_id, "assistant", ai_reply, t))
+    conn.commit()
     st.rerun()
-
-# ================== USER CONSENT ==================
-consent = st.checkbox(
-    "I agree my image may be stored anonymously to improve the AI. This is not medical advice."
-)
 
 # ================== IMAGE UPLOAD ==================
 uploaded = st.file_uploader(
-    "Upload a clear, front-facing face photo (natural light, no filters)",
+    "Upload a clear face photo (natural light, no filters)",
     type=["jpg", "jpeg", "png"]
 )
 
-# ================== IMAGE STORAGE ==================
-def save_image(image, session_id):
-    path = os.path.join(IMAGE_DIR, f"{session_id}.jpg")
-    image.save(path)
-    return path
+def analyze_mock():
+    skin = random.choice(["Oily", "Dry", "Combination", "Normal", "Sensitive"])
+    issues = random.sample(
+        ["Mild acne", "Pigmentation", "Redness", "Uneven tone", "Dry patches"], 2
+    )
+    confidence = random.randint(65, 85)
+    return skin, issues, confidence
 
-# ================== BRAIN 1 (OPENAI MOCK) ==================
-def brain_openai_mock():
-    return {
-        "skin_type": random.choice(["Oily", "Dry", "Combination", "Normal", "Sensitive"]),
-        "issues": random.sample(
-            ["Mild acne", "Open pores", "Pigmentation", "Uneven tone", "Dullness"],
-            k=2
-        ),
-        "confidence": random.randint(65, 85),
-        "doctor_flag": 0,
-        "notes": "Primary AI visual analysis."
-    }
+# ================== MAIN ANALYSIS ==================
+analysis_result = None
+previous_case = None
 
-# ================== BRAIN 2 (GEMINI MOCK) ==================
-def brain_gemini_mock():
-    return {
-        "skin_type": random.choice(["Oily", "Combination", "Normal"]),
-        "issues": random.sample(
-            ["Oil imbalance", "Texture irregularity", "Redness", "Dry patches"],
-            k=2
-        ),
-        "confidence": random.randint(60, 80),
-        "doctor_flag": 0,
-        "notes": "Secondary AI cross-check analysis."
-    }
-
-# ================== CONSENSUS ENGINE ==================
-def consensus(a, b):
-    same_skin = a["skin_type"] == b["skin_type"]
-    avg_conf = int((a["confidence"] + b["confidence"]) / 2)
-    issues = list(set(a["issues"] + b["issues"]))
-    doctor_flag = 1 if (a["doctor_flag"] or b["doctor_flag"]) else 0
-
-    if not same_skin:
-        avg_conf -= 10
-
-    return {
-        "skin_type": a["skin_type"] if same_skin else "Uncertain",
-        "issues": issues,
-        "confidence": max(avg_conf, 50),
-        "doctor_flag": doctor_flag,
-        "notes": "Consensus from multiple AI models."
-    }
-
-# ================== ROUTINE ENGINE ==================
-def generate_routine(skin_type, issues):
-    routine = {
-        "Morning": [
-            "Cleanse face gently with lukewarm water",
-            "Use a mild, non-stripping cleanser",
-            "Apply lightweight hydration",
-            "Apply broad-spectrum sun protection",
-        ],
-        "Night": [
-            "Cleanse face to remove dirt and oil",
-            "Apply calming hydration",
-            "Use barrier-repair moisturizer",
-        ],
-        "Weekly": [
-            "Exfoliate gently once or twice a week",
-            "Use a soothing mask if skin feels irritated",
-        ],
-        "Avoid": [
-            "Over-washing the face",
-            "Harsh scrubs or strong chemicals",
-            "Touching or picking skin frequently",
-        ]
-    }
-
-    if "Mild acne" in issues:
-        routine["Night"].append("Focus on keeping pores clean and unclogged")
-
-    if "Dry patches" in issues:
-        routine["Morning"].append("Prioritize deep hydration")
-        routine["Night"].append("Apply richer moisturizer")
-
-    if skin_type == "Oily":
-        routine["Avoid"].append("Heavy or greasy products")
-
-    return routine
-
-# ================== MAIN FLOW ==================
-if consent and uploaded:
-    session_id = str(uuid.uuid4())
+if uploaded:
     image = Image.open(uploaded).convert("RGB")
-
     st.image(image, caption="Uploaded Image", use_column_width=True)
-    st.info("Analyzing skin…")
 
-    if STORE_IMAGES:
-        image_path = save_image(image, session_id)
-        c.execute("INSERT OR IGNORE INTO images VALUES (?,?)", (session_id, image_path))
-        conn.commit()
-
-    if MOCK_MODE:
-        a = brain_openai_mock()
-        b = brain_gemini_mock() if ENABLE_SECOND_BRAIN else None
-        final = consensus(a, b) if b else a
-        brain_used = "openai + gemini (mock)" if b else "openai (mock)"
-    else:
-        final = {
-            "skin_type": "Pending",
-            "issues": [],
-            "confidence": 0,
-            "doctor_flag": 0,
-            "notes": "Live AI mode enabled."
-        }
-        brain_used = "live"
-
-    routine = generate_routine(final["skin_type"], final["issues"])
-
-    st.subheader("AI Skin Analysis")
-    st.write(f"**Skin Type:** {final['skin_type']}")
-    st.write(f"**Issues:** {', '.join(final['issues'])}")
-    st.write(f"**Confidence:** {final['confidence']}%")
-
-    if final["doctor_flag"]:
-        st.warning("Consider consulting a dermatologist.")
-
-    st.caption(final["notes"])
-
-    st.subheader("Personalized Skincare Routine")
-    for section, steps in routine.items():
-        st.markdown(f"**{section}**")
-        for step in steps:
-            st.markdown(f"- {step}")
+    skin, issues, confidence = analyze_mock()
+    today = datetime.now().strftime("%Y-%m-%d")
 
     c.execute(
-        "INSERT OR REPLACE INTO cases VALUES (?,?,?,?,?,?,?)",
-        (
-            session_id,
-            final["skin_type"],
-            ", ".join(final["issues"]),
-            final["confidence"],
-            final["doctor_flag"],
-            brain_used,
-            final["notes"]
-        )
+        "SELECT date, skin_type, issues, confidence FROM cases WHERE user_id=? ORDER BY date ASC",
+        (user_id,)
     )
+    history = c.fetchall()
+
+    if history:
+        previous_case = history[0]
+
+    c.execute("INSERT INTO cases VALUES (?,?,?,?,?)",
+              (user_id, today, skin, ", ".join(issues), confidence))
     conn.commit()
 
-    feedback = st.radio("Did this help you?", ["", "Yes", "No"])
-    if feedback:
-        c.execute("INSERT INTO feedback VALUES (?,?)", (session_id, feedback))
-        conn.commit()
-        st.success("Thanks. This helps the AI learn.")
+    analysis_result = (skin, issues, confidence)
+
+# ================== DISPLAY RESULT ==================
+if analysis_result:
+    skin, issues, confidence = analysis_result
+
+    st.subheader("Skin Analysis")
+    st.write(f"**Skin Type:** {skin}")
+    st.write(f"**Issues:** {', '.join(issues)}")
+    st.write(f"**Confidence:** {confidence}%")
+
+    if previous_case:
+        st.subheader("Progress Comparison")
+        st.write(f"Previous Skin Type: {previous_case[1]}")
+        st.write(f"Previous Issues: {previous_case[2]}")
+        st.write(
+            "Compared to your earlier record, your skin condition has changed."
+        )
+
+# ================== PDF GENERATION ==================
+def generate_pdf():
+    file_path = os.path.join(PDF_DIR, f"{user_id}.pdf")
+    c = canvas.Canvas(file_path, pagesize=A4)
+    width, height = A4
+
+    c.setFont("Helvetica", 12)
+    c.drawString(40, height - 40, "AI Dermatology Report")
+    c.drawString(40, height - 80, f"Skin Type: {skin}")
+    c.drawString(40, height - 110, f"Issues: {', '.join(issues)}")
+    c.drawString(40, height - 140, f"Confidence: {confidence}%")
+
+    if previous_case:
+        c.drawString(40, height - 180, "Progress Summary:")
+        c.drawString(40, height - 210, f"Earlier Issues: {previous_case[2]}")
+
+    c.drawString(40, height - 260, "Disclaimer: This is not medical advice.")
+    c.save()
+    return file_path
+
+if analysis_result:
+    if st.button("Generate PDF Report"):
+        pdf_path = generate_pdf()
+        with open(pdf_path, "rb") as f:
+            st.download_button("Download Report", f, file_name="skin_report.pdf")
