@@ -4,6 +4,7 @@ import uuid
 import os
 import random
 from PIL import Image
+from datetime import datetime
 
 # ================== CONFIG ==================
 MOCK_MODE = True              # 🔴 CHANGE TO False WHEN CARD WORKS
@@ -50,6 +51,61 @@ CREATE TABLE IF NOT EXISTS images (
 """)
 
 conn.commit()
+
+# ================== CHAT MEMORY (BROWSER) ==================
+if "chat_messages" not in st.session_state:
+    st.session_state.chat_messages = [
+        {
+            "role": "assistant",
+            "content": (
+                "Hi 👋 I’m your AI Dermatology Assistant.\n\n"
+                "You can ask skin or hair related questions, "
+                "or upload a face photo for deeper analysis."
+            ),
+            "time": datetime.now().strftime("%H:%M")
+        }
+    ]
+
+# ================== CHAT DISPLAY ==================
+st.subheader("Chat")
+
+for msg in st.session_state.chat_messages:
+    if msg["role"] == "user":
+        st.markdown(f"**You ({msg['time']}):** {msg['content']}")
+    else:
+        st.markdown(f"**AI ({msg['time']}):** {msg['content']}")
+
+# ================== CHAT INPUT ==================
+user_input = st.text_input("Type your message and press Enter")
+
+if user_input:
+    st.session_state.chat_messages.append({
+        "role": "user",
+        "content": user_input,
+        "time": datetime.now().strftime("%H:%M")
+    })
+
+    st.session_state.chat_messages.append({
+        "role": "assistant",
+        "content": (
+            "Thanks for your message. I can help with skin and hair concerns. "
+            "You may upload a face photo for more accurate guidance."
+        ),
+        "time": datetime.now().strftime("%H:%M")
+    })
+
+    st.rerun()
+
+# ================== USER CONSENT ==================
+consent = st.checkbox(
+    "I agree my image may be stored anonymously to improve the AI. This is not medical advice."
+)
+
+# ================== IMAGE UPLOAD ==================
+uploaded = st.file_uploader(
+    "Upload a clear, front-facing face photo (natural light, no filters)",
+    type=["jpg", "jpeg", "png"]
+)
 
 # ================== IMAGE STORAGE ==================
 def save_image(image, session_id):
@@ -138,16 +194,6 @@ def generate_routine(skin_type, issues):
 
     return routine
 
-# ================== UI ==================
-consent = st.checkbox(
-    "I agree my image may be stored anonymously to improve the AI. This is not medical advice."
-)
-
-uploaded = st.file_uploader(
-    "Upload a clear, front-facing face photo (natural light, no filters)",
-    type=["jpg", "jpeg", "png"]
-)
-
 # ================== MAIN FLOW ==================
 if consent and uploaded:
     session_id = str(uuid.uuid4())
@@ -161,18 +207,12 @@ if consent and uploaded:
         c.execute("INSERT OR IGNORE INTO images VALUES (?,?)", (session_id, image_path))
         conn.commit()
 
-    # ---------- AI LOGIC ----------
     if MOCK_MODE:
         a = brain_openai_mock()
-        if ENABLE_SECOND_BRAIN:
-            b = brain_gemini_mock()
-            final = consensus(a, b)
-            brain_used = "openai + gemini (mock)"
-        else:
-            final = a
-            brain_used = "openai (mock)"
+        b = brain_gemini_mock() if ENABLE_SECOND_BRAIN else None
+        final = consensus(a, b) if b else a
+        brain_used = "openai + gemini (mock)" if b else "openai (mock)"
     else:
-        # 🔥 LIVE MODE (WILL BE FILLED LATER)
         final = {
             "skin_type": "Pending",
             "issues": [],
@@ -182,17 +222,15 @@ if consent and uploaded:
         }
         brain_used = "live"
 
-    # ---------- ROUTINE ----------
     routine = generate_routine(final["skin_type"], final["issues"])
 
-    # ---------- DISPLAY ----------
     st.subheader("AI Skin Analysis")
     st.write(f"**Skin Type:** {final['skin_type']}")
-    st.write(f"**Issues:** {', '.join(final['issues']) if final['issues'] else 'None'}")
+    st.write(f"**Issues:** {', '.join(final['issues'])}")
     st.write(f"**Confidence:** {final['confidence']}%")
 
     if final["doctor_flag"]:
-        st.warning("Consider consulting a dermatologist for further evaluation.")
+        st.warning("Consider consulting a dermatologist.")
 
     st.caption(final["notes"])
 
@@ -202,7 +240,6 @@ if consent and uploaded:
         for step in steps:
             st.markdown(f"- {step}")
 
-    # ---------- STORE CASE ----------
     c.execute(
         "INSERT OR REPLACE INTO cases VALUES (?,?,?,?,?,?,?)",
         (
@@ -217,7 +254,6 @@ if consent and uploaded:
     )
     conn.commit()
 
-    # ---------- FEEDBACK ----------
     feedback = st.radio("Did this help you?", ["", "Yes", "No"])
     if feedback:
         c.execute("INSERT INTO feedback VALUES (?,?)", (session_id, feedback))
