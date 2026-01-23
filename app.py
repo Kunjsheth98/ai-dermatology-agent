@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS chat (
 c.execute("""
 CREATE TABLE IF NOT EXISTS cases (
     user_id TEXT,
-    date TEXT,
+    created_at TEXT,
     skin_type TEXT,
     issues TEXT,
     confidence INTEGER
@@ -54,8 +54,12 @@ user_id = st.session_state.user_id
 
 # ================== CHAT MEMORY ==================
 if "chat_messages" not in st.session_state:
-    c.execute("SELECT role, message, time FROM chat WHERE user_id=?", (user_id,))
+    c.execute(
+        "SELECT role, message, time FROM chat WHERE user_id=?",
+        (user_id,)
+    )
     rows = c.fetchall()
+
     if rows:
         st.session_state.chat_messages = [
             {"role": r[0], "content": r[1], "time": r[2]} for r in rows
@@ -65,13 +69,16 @@ if "chat_messages" not in st.session_state:
             "role": "assistant",
             "content": (
                 "Hi 👋 I’m your AI Dermatology Assistant.\n\n"
-                "You can ask skin or hair questions, or upload a face photo."
+                "You can ask skin or hair questions, "
+                "or upload a face photo for deeper analysis."
             ),
             "time": datetime.now().strftime("%H:%M")
         }
         st.session_state.chat_messages = [welcome]
-        c.execute("INSERT INTO chat VALUES (?,?,?,?)",
-                  (user_id, "assistant", welcome["content"], welcome["time"]))
+        c.execute(
+            "INSERT INTO chat VALUES (?,?,?,?)",
+            (user_id, "assistant", welcome["content"], welcome["time"])
+        )
         conn.commit()
 
 # ================== CHAT DISPLAY ==================
@@ -82,26 +89,41 @@ for msg in st.session_state.chat_messages:
     st.markdown(f"**{label} ({msg['time']}):** {msg['content']}")
 
 # ================== CHAT INPUT ==================
-user_input = st.text_input("Type your message and press Enter")
+with st.form("chat_form", clear_on_submit=True):
+    user_input = st.text_input("Type your message")
+    submitted = st.form_submit_button("Send")
 
-if user_input:
-    t = datetime.now().strftime("%H:%M")
-    user_msg = {"role": "user", "content": user_input, "time": t}
+if submitted and user_input.strip():
+    time_now = datetime.now().strftime("%H:%M")
+
+    user_msg = {
+        "role": "user",
+        "content": user_input,
+        "time": time_now
+    }
     st.session_state.chat_messages.append(user_msg)
-    c.execute("INSERT INTO chat VALUES (?,?,?,?)",
-              (user_id, "user", user_input, t))
+    c.execute(
+        "INSERT INTO chat VALUES (?,?,?,?)",
+        (user_id, "user", user_input, time_now)
+    )
 
     ai_reply = (
         "Thanks for sharing. I can help only with skin, hair, or scalp concerns. "
-        "You may upload a face photo for deeper analysis."
+        "You can also upload a face photo for deeper analysis."
     )
 
-    ai_msg = {"role": "assistant", "content": ai_reply, "time": t}
+    ai_msg = {
+        "role": "assistant",
+        "content": ai_reply,
+        "time": time_now
+    }
     st.session_state.chat_messages.append(ai_msg)
-    c.execute("INSERT INTO chat VALUES (?,?,?,?)",
-              (user_id, "assistant", ai_reply, t))
+    c.execute(
+        "INSERT INTO chat VALUES (?,?,?,?)",
+        (user_id, "assistant", ai_reply, time_now)
+    )
+
     conn.commit()
-    st.rerun()
 
 # ================== IMAGE UPLOAD ==================
 uploaded = st.file_uploader(
@@ -110,26 +132,26 @@ uploaded = st.file_uploader(
 )
 
 def analyze_mock():
-    skin = random.choice(["Oily", "Dry", "Combination", "Normal", "Sensitive"])
-    issues = random.sample(
-        ["Mild acne", "Pigmentation", "Redness", "Uneven tone", "Dry patches"], 2
+    return (
+        random.choice(["Oily", "Dry", "Combination", "Normal", "Sensitive"]),
+        random.sample(
+            ["Mild acne", "Pigmentation", "Redness", "Uneven tone", "Dry patches"], 2
+        ),
+        random.randint(65, 85)
     )
-    confidence = random.randint(65, 85)
-    return skin, issues, confidence
 
-# ================== MAIN ANALYSIS ==================
 analysis_result = None
 previous_case = None
 
 if uploaded:
     image = Image.open(uploaded).convert("RGB")
-    st.image(image, caption="Uploaded Image", use_column_width=True)
+    st.image(image, caption="Uploaded Image", width=400)
 
     skin, issues, confidence = analyze_mock()
     today = datetime.now().strftime("%Y-%m-%d")
 
     c.execute(
-        "SELECT date, skin_type, issues, confidence FROM cases WHERE user_id=? ORDER BY date ASC",
+        "SELECT created_at, skin_type, issues FROM cases WHERE user_id=? ORDER BY created_at ASC",
         (user_id,)
     )
     history = c.fetchall()
@@ -137,13 +159,15 @@ if uploaded:
     if history:
         previous_case = history[0]
 
-    c.execute("INSERT INTO cases VALUES (?,?,?,?,?)",
-              (user_id, today, skin, ", ".join(issues), confidence))
+    c.execute(
+        "INSERT INTO cases VALUES (?,?,?,?,?)",
+        (user_id, today, skin, ", ".join(issues), confidence)
+    )
     conn.commit()
 
     analysis_result = (skin, issues, confidence)
 
-# ================== DISPLAY RESULT ==================
+# ================== DISPLAY ==================
 if analysis_result:
     skin, issues, confidence = analysis_result
 
@@ -154,34 +178,30 @@ if analysis_result:
 
     if previous_case:
         st.subheader("Progress Comparison")
-        st.write(f"Previous Skin Type: {previous_case[1]}")
-        st.write(f"Previous Issues: {previous_case[2]}")
-        st.write(
-            "Compared to your earlier record, your skin condition has changed."
-        )
+        st.write(f"Earlier skin type: {previous_case[1]}")
+        st.write(f"Earlier issues: {previous_case[2]}")
 
-# ================== PDF GENERATION ==================
+# ================== PDF ==================
 def generate_pdf():
-    file_path = os.path.join(PDF_DIR, f"{user_id}.pdf")
-    c = canvas.Canvas(file_path, pagesize=A4)
-    width, height = A4
+    path = os.path.join(PDF_DIR, f"{user_id}.pdf")
+    cpdf = canvas.Canvas(path, pagesize=A4)
+    w, h = A4
 
-    c.setFont("Helvetica", 12)
-    c.drawString(40, height - 40, "AI Dermatology Report")
-    c.drawString(40, height - 80, f"Skin Type: {skin}")
-    c.drawString(40, height - 110, f"Issues: {', '.join(issues)}")
-    c.drawString(40, height - 140, f"Confidence: {confidence}%")
+    cpdf.setFont("Helvetica", 12)
+    cpdf.drawString(40, h - 40, "AI Dermatology Report")
+    cpdf.drawString(40, h - 80, f"Skin Type: {skin}")
+    cpdf.drawString(40, h - 110, f"Issues: {', '.join(issues)}")
+    cpdf.drawString(40, h - 140, f"Confidence: {confidence}%")
 
     if previous_case:
-        c.drawString(40, height - 180, "Progress Summary:")
-        c.drawString(40, height - 210, f"Earlier Issues: {previous_case[2]}")
+        cpdf.drawString(40, h - 180, "Progress Summary:")
+        cpdf.drawString(40, h - 210, f"Earlier Issues: {previous_case[2]}")
 
-    c.drawString(40, height - 260, "Disclaimer: This is not medical advice.")
-    c.save()
-    return file_path
+    cpdf.drawString(40, h - 260, "Disclaimer: Not medical advice.")
+    cpdf.save()
+    return path
 
-if analysis_result:
-    if st.button("Generate PDF Report"):
-        pdf_path = generate_pdf()
-        with open(pdf_path, "rb") as f:
-            st.download_button("Download Report", f, file_name="skin_report.pdf")
+if analysis_result and st.button("Generate PDF Report"):
+    pdf = generate_pdf()
+    with open(pdf, "rb") as f:
+        st.download_button("Download Report", f, file_name="skin_report.pdf")
